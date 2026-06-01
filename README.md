@@ -18,8 +18,9 @@ relevant chunks.
 | Chunking (prose + code, with overlap) | Done | `src/chunking.py` |
 | Embeddings (Sentence-BERT, L2-normalized) | Done | `src/embeddings.py` |
 | Vector search (FAISS, cosine similarity) | Done | `src/retrieval.py` |
+| Q&A / answer synthesis (grounded, cited) | Done | `src/qa.py` |
 | Orchestration + CLI | Done | `src/pipeline.py`, `main.py` |
-| Unit tests (deterministic fake encoder) | Done | `tests/` |
+| Unit tests (deterministic fake encoder + LLM) | Done | `tests/` |
 
 ## Quickstart
 
@@ -30,8 +31,11 @@ pip install -r requirements.txt
 # Index the sample repo and run the default demo queries.
 python main.py --repo data/repo1 -v
 
-# Ask a specific question.
+# Retrieve raw chunks for a query.
 python main.py --repo data/repo1 --query "Where is caching used?"
+
+# Ask a question and get a synthesized, cited answer.
+python main.py --repo data/repo1 --ask "Where is caching used and why?"
 
 # Drop into an interactive prompt.
 python main.py --repo data/repo1 --interactive
@@ -39,6 +43,30 @@ python main.py --repo data/repo1 --interactive
 # Persist the index so repeat runs skip re-embedding.
 python main.py --repo data/repo1 --save .cache/repo1
 ```
+
+### Answer synthesis (Q&A)
+
+`--ask` runs the full **retrieve → synthesize** path: it embeds the
+question, pulls the most relevant chunks, packs them into a
+token-bounded, citation-tagged context block, and asks a language model
+to answer **using only that context**. Every answer carries its
+`Citation`s, a `confidence` score (mean similarity of the sources used),
+and the `strategy` that produced it.
+
+The LLM client is injectable and **optional**. With no `openai` install
+and no API key, the system transparently falls back to a deterministic
+`ExtractiveLLM` that quotes the retrieved sources — so the Q&A path
+works offline, in CI, and in demos with zero setup. To enable the
+LLM-backed path:
+
+```bash
+pip install "openai>=1.30,<2.0"
+export OPENAI_API_KEY=sk-...
+python main.py --repo data/repo1 --ask "Why was caching added?"
+```
+
+If the model call fails at runtime (timeout, rate limit, bad response),
+the synthesizer degrades to the extractive answer rather than erroring.
 
 ## Running the tests
 
@@ -57,7 +85,8 @@ repo on disk
     -> src/chunking.py         (Documents -> Chunks)
     -> src/embeddings.py       (Chunks -> normalized vectors)
     -> src/retrieval.py        (vectors + Chunks -> FAISS index)
-    -> src/pipeline.py         (glue + query API)
+    -> src/qa.py               (RetrievalResults -> grounded Answer)
+    -> src/pipeline.py         (glue + query/answer API)
 ```
 
 All cross-layer contracts are defined in `src/schema.py` so later

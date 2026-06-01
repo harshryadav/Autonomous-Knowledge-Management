@@ -3,5 +3,11 @@ sentence-transformers>=2.7.0,<3.0
 faiss-cpu>=1.7.4,<2.0
 numpy>=1.24,<2.0
 
+# Optional: LLM-backed answer synthesis. The Q&A layer falls back to a
+# deterministic extractive engine when this is absent or no API key is
+# set, so it stays optional for local dev, CI, and offline demos.
+# Install with:  pip install "openai>=1.30,<2.0"
+# openai>=1.30,<2.0
+
 # Dev / test
 pytest>=8.0,<9.0
