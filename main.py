@@ -20,6 +20,7 @@ from typing import List
 from src.config import PipelineConfig
 from src.pipeline import Pipeline
 from src.retrieval import RetrievalResult
+from src.schema import Answer
 
 
 DEFAULT_QUERIES = [
@@ -55,6 +56,18 @@ def print_results(query: str, results: List[RetrievalResult]) -> None:
         print(f"    {preview}")
 
 
+def print_answer(answer: Answer) -> None:
+    print(f"\n=== Question: {answer.query}")
+    print(f"\n{answer.text}")
+    print(
+        f"\n[strategy={answer.strategy} confidence={answer.confidence:.2f}]"
+    )
+    if answer.citations:
+        print("\nSources:")
+        for c in answer.citations:
+            print(f"  [{c.marker}] {c.location()} ({c.type}) score={c.score:.3f}")
+
+
 def run_interactive(pipeline: Pipeline) -> None:
     print("Type a query and press Enter. Blank line, Ctrl-D, or Ctrl-C to quit.")
     while True:
@@ -79,7 +92,8 @@ def main(argv: List[str] | None = None) -> int:
         description="Autonomous Knowledge Management retriever"
     )
     parser.add_argument("--repo", required=True, help="Path to the repo to index")
-    parser.add_argument("--query", action="append", default=[], help="Query (may be repeated)")
+    parser.add_argument("--query", action="append", default=[], help="Retrieve raw chunks (may be repeated)")
+    parser.add_argument("--ask", action="append", default=[], help="Ask a question, get a synthesized answer (may be repeated)")
     parser.add_argument("--top-k", type=int, default=5, help="Results per query")
     parser.add_argument("--interactive", action="store_true", help="Prompt loop after indexing")
     parser.add_argument("--save", help="Optional directory to persist the built index")
@@ -93,7 +107,14 @@ def main(argv: List[str] | None = None) -> int:
 
     pipeline = build_pipeline(args.repo, args.top_k)
 
-    queries = args.query or (DEFAULT_QUERIES if not args.interactive else [])
+    for question in args.ask:
+        print_answer(pipeline.answer(question))
+
+    # Default demo queries only fire when the user asked for nothing
+    # specific (no --query, no --ask) and isn't entering interactive mode.
+    queries = args.query
+    if not queries and not args.ask and not args.interactive:
+        queries = DEFAULT_QUERIES
     for q in queries:
         print_results(q, pipeline.query(q))
 
