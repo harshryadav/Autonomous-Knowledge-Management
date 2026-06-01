@@ -43,6 +43,14 @@ class PipelineConfig:
     # Encoding
     batch_size: int = 32
 
+    # Q&A / answer synthesis
+    answer_top_k: int = 6                 # chunks pulled before context packing
+    answer_max_context_chars: int = 6000  # rough token budget for the LLM prompt
+    answer_min_score: float = 0.15        # below this we refuse rather than guess
+    llm_model: str = "gpt-4o-mini"        # only used by the LLM-backed strategy
+    llm_timeout_s: float = 30.0
+    llm_max_tokens: int = 512
+
     @classmethod
     def default(cls) -> "PipelineConfig":
         return cls()

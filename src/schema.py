@@ -97,3 +97,65 @@ class Chunk:
             chunk_index=chunk_index,
             extra=dict(doc.extra),
         )
+
+
+@dataclass
+class Citation:
+    """A single source backing an answer.
+
+    Answers must be *grounded*: every claim should trace back to a
+    concrete location in the repo. A Citation is the minimal pointer
+    needed to let a developer jump to that location and verify the
+    answer themselves. We deliberately keep the source `content`
+    around (not just the location) so the UI can render a snippet and
+    so we can later score answer/source faithfulness offline.
+    """
+
+    marker: int          # 1-indexed [n] reference used inside answer text
+    file: str
+    type: str
+    score: float         # retrieval similarity that surfaced this source
+    function: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    content: str = ""
+
+    def location(self) -> str:
+        """Human-readable `file::function:Lstart` pointer for display/logs."""
+        loc = self.file
+        if self.function:
+            loc += f"::{self.function}"
+        if self.start_line is not None:
+            loc += f":L{self.start_line}"
+        return loc
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Answer:
+    """The synthesized response to a developer question.
+
+    This is the public contract of the intelligence layer: a natural
+    language `text`, the `citations` that ground it, and enough
+    metadata (`confidence`, `strategy`) for callers to decide how much
+    to trust it and how to render it. Keeping this as a plain dataclass
+    (rather than a bare string) means downstream consumers - a CLI, a
+    web API, an evaluation harness - all speak the same language.
+    """
+
+    text: str
+    citations: list = field(default_factory=list)  # list[Citation]
+    confidence: float = 0.0           # 0..1, derived from retrieval scores
+    strategy: str = "extractive"      # which synthesizer produced this
+    query: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text": self.text,
+            "citations": [c.to_dict() for c in self.citations],
+            "confidence": float(self.confidence),
+            "strategy": self.strategy,
+            "query": self.query,
+        }
