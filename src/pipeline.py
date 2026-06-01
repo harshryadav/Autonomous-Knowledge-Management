@@ -18,8 +18,9 @@ from src.chunking import chunk_documents
 from src.config import PipelineConfig
 from src.embeddings import Embedder
 from src.ingestion import load_repo
+from src.qa import AnswerSynthesizer
 from src.retrieval import Retriever, RetrievalResult
-from src.schema import Chunk
+from src.schema import Answer, Chunk
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +33,14 @@ class Pipeline:
         config: Optional[PipelineConfig] = None,
         embedder: Optional[Embedder] = None,
         retriever: Optional[Retriever] = None,
+        synthesizer: Optional[AnswerSynthesizer] = None,
     ) -> None:
         self.config = config or PipelineConfig.default()
         self.embedder = embedder or Embedder(self.config)
         self.retriever = retriever or Retriever(dim=self.config.embedding_dim)
+        # The synthesizer is injectable so callers can swap in a real
+        # LLM client, a fake (tests), or rely on the offline fallback.
+        self.synthesizer = synthesizer or AnswerSynthesizer(self.config)
 
     # ------------------------------------------------------------------ #
     # Build
@@ -72,6 +77,20 @@ class Pipeline:
         k = k if k is not None else self.config.top_k
         query_vec = self.embedder.encode([text])
         return self.retriever.search(query_vec, k=k)
+
+    def answer(self, text: str, k: Optional[int] = None) -> Answer:
+        """Retrieve, then synthesize a grounded, cited answer.
+
+        This is the end-to-end "ask a question, get an answer" entry
+        point: query -> vector search -> answer synthesis. It reuses
+        `query()` for retrieval so the two paths can never diverge on
+        how chunks are found.
+        """
+        if not text or not text.strip():
+            raise ValueError("query text must be non-empty")
+        k = k if k is not None else self.config.answer_top_k
+        results = self.query(text, k=k)
+        return self.synthesizer.synthesize(text, results)
 
     # ------------------------------------------------------------------ #
     # Persistence

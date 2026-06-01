@@ -6,7 +6,7 @@ decoupled so later work (entity extraction, knowledge graphs, Q&A)
 can slot in on top without reshaping the rest of the pipeline.
 """
 
-from src.schema import Document, Chunk
+from src.schema import Answer, Chunk, Citation, Document
 from src.pipeline import Pipeline
 
-__all__ = ["Document", "Chunk", "Pipeline"]
+__all__ = ["Document", "Chunk", "Pipeline", "Answer", "Citation"]
