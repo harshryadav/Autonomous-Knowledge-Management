@@ -4,13 +4,52 @@ Intelligent knowledge-management system that extracts architectural and
 implementation knowledge from source code, builds queryable structures
 over it, and helps developers understand the "why" behind decisions.
 
-The work is planned in four weekly milestones (see `PROJECT_PLAN.md`).
-The current branch implements the first milestone: an end-to-end
-retrieval baseline that ingests a repository, chunks its text, embeds
-every chunk, and answers free-form queries by returning the most
-relevant chunks.
+The repository contains two complementary systems:
 
-## What's in this branch
+1. **GapMap CLI** (`gapmap/`) - a documentation-debt auditor that
+   finds the riskiest undocumented files in a repo and drafts the
+   missing Architecture Decision Records.
+2. **Retrieval pipeline** (`src/`) - a semantic search + Q&A baseline
+   that ingests a repository, embeds its text, and answers free-form
+   questions with cited sources (see `PROJECT_PLAN.md`).
+
+## GapMap - find your riskiest undocumented code
+
+GapMap parses every Python file, builds an import graph (NetworkX),
+scores each file with `risk = incoming dependencies x lines of code`,
+scans all Markdown docs to see which risky files are never mentioned,
+and turns the result into audits, explanations, ADR drafts, and an
+HTML report.
+
+```bash
+pip install -r requirements.txt
+
+# Scan files, LOC, and import relationships.
+python -m gapmap parse --repo data/demo_repo
+
+# The MVP view: top undocumented high-risk files.
+python -m gapmap audit --repo data/demo_repo
+
+# Explain why a file is risky (grounded in measured facts).
+python -m gapmap ask payment_router.py "why is this risky?" --repo data/demo_repo
+
+# Draft the missing ADR into docs/payment_router_ADR.md.
+python -m gapmap generate payment_router.py --repo data/demo_repo
+
+# Self-contained HTML report (gapmap-report.html).
+python -m gapmap report --repo data/demo_repo
+```
+
+Install as a real command with `pip install -e .` - then just run
+`gapmap audit`. ADR generation and `ask` work fully offline; if
+`OPENAI_API_KEY` is set (and `openai` installed), the same facts are
+rewritten more fluently by a model.
+
+`data/demo_repo/` is a small payments service where
+`payment_router.py` is imported by 6 files and documented nowhere -
+run the audit there for an instant demo.
+
+## Retrieval pipeline (semantic search + Q&A)
 
 | Layer | Status | Module |
 |-------|--------|--------|

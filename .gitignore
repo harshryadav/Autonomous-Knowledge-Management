@@ -26,3 +26,6 @@ dist/
 .cache/
 models/
 *.faiss
+
+# GapMap generated artifacts
+gapmap-report.html
