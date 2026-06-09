@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gapmap"
+version = "0.1.0"
+description = "Find the riskiest undocumented code in your repository and draft the missing ADRs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+llm = ["openai>=1.30,<2.0"]
+
+[project.scripts]
+gapmap = "gapmap.cli:main"
+
+[tool.setuptools]
+packages = ["gapmap"]
