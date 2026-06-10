@@ -1,155 +1,268 @@
 """Phase 8 - ADR generator.
 
-`gapmap generate payment_router.py` writes
-`docs/payment_router_ADR.md` with the sections the implementation plan
-requires: Context, Inferred Decision, Systemic Role, Trade-offs,
-Risks, and Recommended Human Review.
+``gapmap generate route_payment`` drafts an entity-focused ADR using
+the entity's source block (not the whole file), graph centrality, and
+an optional LLM pass with a Principal Engineer system prompt.
 
-Every section is grounded in measured facts (graph degrees, LOC, doc
-scan, AST structure). With an OpenAI key set, the same facts are
-rewritten more fluently by a model; the structure and the "draft -
-needs human review" framing are identical either way.
+Output path: ``docs/adr/00X_<entity_name>_ADR.md``
 """
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from gapmap.analysis import RepoAnalysis
-from gapmap.ask import summarize_source
 from gapmap.llm import maybe_complete
+from gapmap.parser import EntityInfo
 from gapmap.risk_engine import risk_level
 
+ADR_DIR = "docs/adr"
+ADR_SEQUENCE_RE = re.compile(r"^(\d{3})_.*_ADR\.md$")
 
-def adr_path_for(analysis: RepoAnalysis, path: str) -> Path:
-    return analysis.root / "docs" / f"{Path(path).stem}_ADR.md"
+
+def extract_entity_source(
+    analysis: RepoAnalysis, entity: EntityInfo
+) -> str:
+    """Return only the source lines for this entity (not the whole file)."""
+    path = analysis.root / entity.file
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    start = max(entity.start_line - 1, 0)
+    end = min(entity.end_line, len(lines))
+    return "\n".join(lines[start:end])
 
 
-def build_adr(analysis: RepoAnalysis, path: str) -> str:
-    """Render the ADR markdown for one file."""
-    risk = analysis.risk_for(path)
+def adr_path_for(analysis: RepoAnalysis, key: str) -> Path:
+    """Next numbered ADR path: ``docs/adr/00X_<entity_name>_ADR.md``."""
+    entity = analysis.entities.get(key)
+    name = entity.entity_name if entity else key.split("::")[-1]
+    sequence = _next_adr_sequence(analysis.root)
+    return analysis.root / ADR_DIR / f"{sequence:03d}_{name}_ADR.md"
+
+
+def generate_adr(
+    analysis: RepoAnalysis,
+    entity_key: str,
+    source_block: Optional[str] = None,
+) -> str:
+    """Generate an ADR for a specific entity node and its source block.
+
+    ``entity_key`` format: ``payment_service.py::PaymentRouter``
+    ``source_block`` defaults to the entity's lines from its parent file.
+    """
+    risk = analysis.risk_for(entity_key)
     if risk is None:
-        raise ValueError(f"{path} not found in the scanned repository")
+        raise ValueError(f"{entity_key} not found in the scanned repository")
 
-    rank = analysis.rank_of(path)
-    importers = analysis.importers_of(path)
-    dependencies = analysis.dependencies_of(path)
-    documented = analysis.is_documented(path)
+    entity = analysis.entities.get(entity_key)
+    if entity is None:
+        raise ValueError(f"No entity metadata for {entity_key}")
+
+    if source_block is None:
+        source_block = extract_entity_source(analysis, entity)
+
+    in_degree = risk.incoming
+    importers = analysis.importers_of(entity_key)
+    dependencies = analysis.dependencies_of(entity_key)
+    documented = analysis.is_documented(entity_key)
+    rank = analysis.rank_of(entity_key)
     level = risk_level(risk.score, analysis.max_score())
-    summary = summarize_source(analysis.root, path)
-    name = Path(path).name
+    label = f"{risk.entity_name} ({risk.entity_type} in {risk.file})"
+    kind = "Class" if risk.entity_type == "class" else "Function"
 
-    context = _context_section(name, risk, rank, level, documented, summary)
-    decision = _decision_section(name, risk, importers, dependencies, summary)
-    role = _role_section(name, importers, dependencies)
-    tradeoffs = _tradeoffs_section(name, risk)
-    risks = _risks_section(name, risk, documented)
-    review = _review_section(name)
-
-    body = _assemble(
-        name, context, decision, role, tradeoffs, risks, review
+    system = _principal_engineer_system(in_degree, kind)
+    user = _llm_user_prompt(
+        entity_key=entity_key,
+        label=label,
+        in_degree=in_degree,
+        rank=rank,
+        level=level,
+        documented=documented,
+        importers=importers,
+        dependencies=dependencies,
+        source_block=source_block,
     )
 
-    polished = maybe_complete(
-        system=(
-            "You are GapMap, drafting an Architecture Decision Record. "
-            "Rewrite the draft ADR below so it reads naturally, keeping the "
-            "exact same markdown section headings, all factual claims, and "
-            "the 'draft / needs human review' framing. Do not add facts."
-        ),
-        user=body,
+    llm_adr = maybe_complete(system=system, user=user, max_tokens=1200)
+    if llm_adr:
+        return _ensure_adr_header(llm_adr, risk.entity_name, entity_key)
+
+    return _template_adr(
+        analysis, entity_key, entity, risk, source_block,
+        rank, level, documented, importers, dependencies, label,
     )
-    return polished or body
 
 
-def write_adr(analysis: RepoAnalysis, path: str) -> Path:
+def build_adr(analysis: RepoAnalysis, key: str) -> str:
+    """Backward-compatible alias for :func:`generate_adr`."""
+    return generate_adr(analysis, key)
+
+
+def write_adr(analysis: RepoAnalysis, key: str) -> Path:
     """Generate and save the ADR. Returns the output path."""
-    output = adr_path_for(analysis, path)
+    output = adr_path_for(analysis, key)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(build_adr(analysis, path), encoding="utf-8")
+    output.write_text(generate_adr(analysis, key), encoding="utf-8")
     return output
 
 
 # --------------------------------------------------------------------------- #
-# Sections
+# LLM prompts
 # --------------------------------------------------------------------------- #
-def _context_section(name, risk, rank, level, documented, summary) -> str:
+def _principal_engineer_system(in_degree: int, kind: str) -> str:
+    return (
+        f"You are a Principal Engineer. Review this undocumented {kind}. "
+        f"It has an in-degree centrality of {in_degree}, meaning it is a "
+        f"critical, load-bearing component utilized heavily by the rest of "
+        f"the system. Write an Architecture Decision Record (ADR) focusing "
+        f"entirely on why this specific component is structured this way, "
+        f"its exact architectural responsibilities, and the systemic risks "
+        f"of modifying it."
+    )
+
+
+def _llm_user_prompt(
+    *,
+    entity_key: str,
+    label: str,
+    in_degree: int,
+    rank: Optional[int],
+    level: str,
+    documented: bool,
+    importers: List[str],
+    dependencies: List[str],
+    source_block: str,
+) -> str:
+    return f"""Entity: `{entity_key}` ({label})
+Risk rank: #{rank} ({level})
+In-degree (callers): {in_degree}
+Documented: {"yes" if documented else "no"}
+Called by: {", ".join(importers) or "none"}
+Calls: {", ".join(dependencies) or "none"}
+
+Source code (this entity only — not the full file):
+```python
+{source_block}
+```
+
+Write a complete ADR in markdown with these sections:
+## Context
+## Inferred Decision
+## Architectural Responsibilities
+## Systemic Role
+## Trade-offs
+## Risks
+## Recommended Human Review
+
+Ground every claim in the source code and call-graph facts above."""
+
+
+# --------------------------------------------------------------------------- #
+# Template fallback (offline / no API key)
+# --------------------------------------------------------------------------- #
+def _template_adr(
+    analysis, entity_key, entity, risk, source_block,
+    rank, level, documented, importers, dependencies, label,
+) -> str:
+    context = _context_section(label, risk, rank, level, documented, entity)
+    decision = _decision_section(risk, importers, dependencies)
+    responsibilities = _responsibilities_section(risk, source_block)
+    role = _role_section(importers, dependencies)
+    tradeoffs = _tradeoffs_section(risk)
+    risks = _risks_section(risk, documented)
+    review = _review_section(risk.entity_name)
+    source_section = f"## Source Code\n\n```python\n{source_block}\n```"
+
+    return _assemble(
+        risk.entity_name, entity_key, label, context, decision,
+        responsibilities, role, tradeoffs, risks, review, source_section,
+    )
+
+
+def _context_section(label, risk, rank, level, documented, entity) -> str:
     lines = [
-        f"`{name}` is ranked **#{rank}** by risk in this repository "
-        f"(risk score **{risk.score}** = {risk.incoming} incoming "
-        f"dependencies x {risk.loc} lines of code, {level} risk).",
+        f"`{label}` is ranked **#{rank}** by risk in this repository "
+        f"(risk score **{risk.score}** = in-degree {risk.incoming} "
+        f"x {risk.loc} lines of code, {level} risk).",
     ]
-    if summary.docstring:
-        lines.append(f'Its module docstring describes it as: "{summary.docstring}".')
+    if entity is not None:
+        lines.append(
+            f"Source location: `{risk.file}` lines "
+            f"{entity.start_line}-{entity.end_line}."
+        )
     if documented:
-        lines.append("Some documentation already mentions this file.")
+        lines.append("Some documentation already mentions this entity.")
     else:
         lines.append(
-            "No existing documentation (README, ADRs, design docs) mentions "
-            "this file, so this record was generated to close that gap."
+            "No existing documentation mentions this entity by name, so "
+            "this record was generated to close that gap."
         )
     return "\n\n".join(lines)
 
 
-def _decision_section(name, risk, importers, dependencies, summary) -> str:
-    shape: List[str] = []
-    if summary.classes:
-        shape.append(f"class(es) `{'`, `'.join(summary.classes)}`")
-    if summary.functions:
-        shape.append(f"{len(summary.functions)} top-level function(s)")
-    shape_text = " and ".join(shape) if shape else "its current structure"
-
+def _decision_section(risk, importers, dependencies) -> str:
     return (
-        f"The codebase centralizes this responsibility in a single module: "
-        f"{len(importers)} file(s) route through `{name}` ({shape_text}) "
-        f"instead of implementing the logic locally. This is an *inferred* "
-        f"decision reconstructed from the dependency structure - the "
-        f"original rationale was not written down and should be confirmed "
-        f"by the authors."
+        f"In-degree centrality of **{risk.incoming}** indicates "
+        f"`{risk.entity_name}` is a load-bearing {risk.entity_type}: "
+        f"{len(importers)} entity/entities call it directly. This is an "
+        f"*inferred* decision reconstructed from the call graph and "
+        f"source structure — confirm with the original authors."
     )
 
 
-def _role_section(name, importers, dependencies) -> str:
+def _responsibilities_section(risk, source_block: str) -> str:
+    preview = source_block.strip().splitlines()[0] if source_block.strip() else ""
+    return (
+        f"`{risk.entity_name}` owns the behaviour shown in its "
+        f"{risk.loc}-line implementation. Review the source block below "
+        f"to determine its exact contract with callers"
+        + (f" (starts with: `{preview[:80]}`)." if preview else ".")
+    )
+
+
+def _role_section(importers, dependencies) -> str:
     lines = []
     if importers:
-        lines.append("**Depended on by:**")
+        lines.append("**Called by:**")
         lines.extend(f"- `{imp}`" for imp in importers)
     else:
-        lines.append("No files currently depend on this module.")
+        lines.append("No other entities currently call this one.")
     if dependencies:
         lines.append("")
-        lines.append("**Depends on:**")
+        lines.append("**Calls / instantiates:**")
         lines.extend(f"- `{dep}`" for dep in dependencies)
     return "\n".join(lines)
 
 
-def _tradeoffs_section(name, risk) -> str:
+def _tradeoffs_section(risk) -> str:
     return "\n".join([
-        f"- **Centralization vs. blast radius.** Routing {risk.incoming} "
-        f"caller(s) through one module avoids duplication, but any breaking "
-        f"change here affects all of them at once.",
-        f"- **Size vs. reviewability.** At {risk.loc} lines, changes are "
-        f"harder to review and the module likely mixes several concerns.",
-        "- **Implicit contract.** Callers rely on behavior that is defined "
-        "only by the implementation, not by documented guarantees.",
+        f"- **Centralization vs. blast radius.** {risk.incoming} caller(s) "
+        f"depend on `{risk.entity_name}`; breaking changes propagate widely.",
+        f"- **Size vs. reviewability.** {risk.loc} lines in this "
+        f"{risk.entity_type} — changes need careful review.",
+        "- **Implicit contract.** Behaviour is defined only by implementation.",
     ])
 
 
-def _risks_section(name, risk, documented) -> str:
+def _risks_section(risk, documented) -> str:
     items = [
-        f"- Single point of failure: a regression in `{name}` propagates "
-        f"to {risk.incoming} dependent file(s).",
+        f"- **Modification risk:** in-degree {risk.incoming} — a regression "
+        f"in `{risk.entity_name}` affects {risk.incoming} dependent "
+        f"entity/entities.",
     ]
     if not documented:
         items.append(
-            "- Knowledge risk: with no written rationale, the design only "
-            "exists in the heads of past contributors."
+            "- **Knowledge risk:** no written rationale exists for this "
+            "component."
         )
     items.append(
-        "- Change risk: new contributors cannot distinguish deliberate "
-        "behavior from accident, making refactors hazardous."
+        "- **Refactor risk:** contributors cannot distinguish deliberate "
+        "design from accident."
     )
     return "\n".join(items)
 
@@ -160,18 +273,22 @@ def _review_section(name) -> str:
         "",
         "A human should confirm:",
         "",
-        "- [ ] Is the inferred decision actually why this module exists?",
-        "- [ ] Are there constraints (performance, compliance, history) not visible in the code?",
-        "- [ ] Which team owns this module going forward?",
-        "- [ ] Should any of the listed dependents be decoupled?",
+        f"- [ ] Is the inferred structure of `{name}` intentional?",
+        "- [ ] Are performance, compliance, or historical constraints missing?",
+        "- [ ] Which team owns this component?",
+        "- [ ] Should callers be decoupled to reduce blast radius?",
     ])
 
 
-def _assemble(name, context, decision, role, tradeoffs, risks, review) -> str:
+def _assemble(
+    name, entity_key, label, context, decision,
+    responsibilities, role, tradeoffs, risks, review, source_section,
+) -> str:
     return f"""# ADR: {name}
 
 - **Status:** Draft (auto-generated by GapMap)
 - **Date:** {date.today().isoformat()}
+- **Entity:** `{entity_key}`
 
 ## Context
 
@@ -180,6 +297,10 @@ def _assemble(name, context, decision, role, tradeoffs, risks, review) -> str:
 ## Inferred Decision
 
 {decision}
+
+## Architectural Responsibilities
+
+{responsibilities}
 
 ## Systemic Role
 
@@ -196,4 +317,32 @@ def _assemble(name, context, decision, role, tradeoffs, risks, review) -> str:
 ## Recommended Human Review
 
 {review}
+
+{source_section}
 """
+
+
+def _ensure_adr_header(text: str, name: str, entity_key: str) -> str:
+    """Prepend metadata if the LLM omitted the standard header."""
+    if text.lstrip().startswith("# ADR"):
+        return text
+    header = (
+        f"# ADR: {name}\n\n"
+        f"- **Status:** Draft (auto-generated by GapMap)\n"
+        f"- **Date:** {date.today().isoformat()}\n"
+        f"- **Entity:** `{entity_key}`\n\n"
+    )
+    return header + text
+
+
+def _next_adr_sequence(root: Path) -> int:
+    """Next 001-style sequence number under ``docs/adr/``."""
+    adr_dir = root / ADR_DIR
+    if not adr_dir.is_dir():
+        return 1
+    highest = 0
+    for path in adr_dir.iterdir():
+        match = ADR_SEQUENCE_RE.match(path.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
