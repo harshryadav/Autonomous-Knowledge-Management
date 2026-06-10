@@ -16,7 +16,9 @@ log = logging.getLogger(__name__)
 MODEL = os.environ.get("GAPMAP_LLM_MODEL", "gpt-4o-mini")
 
 
-def maybe_complete(system: str, user: str) -> Optional[str]:
+def maybe_complete(
+    system: str, user: str, max_tokens: int = 900
+) -> Optional[str]:
     """Return an LLM completion, or None if unavailable / failed."""
     if not os.environ.get("OPENAI_API_KEY"):
         return None
@@ -32,7 +34,7 @@ def maybe_complete(system: str, user: str) -> Optional[str]:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=900,
+            max_tokens=max_tokens,
             timeout=30.0,
         )
         text = (response.choices[0].message.content or "").strip()
